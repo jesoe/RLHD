@@ -429,6 +429,7 @@ public class HdPlugin extends Plugin {
 	public boolean configLegacyGreyColors;
 	public boolean configModelBatching;
 	public boolean configModelCaching;
+	public boolean configModelReuse;
 	public boolean configShadowsEnabled;
 	public boolean configShadowTransparency;
 	public boolean configRoofShadows;
@@ -1819,6 +1820,7 @@ public class HdPlugin extends Plugin {
 		configLegacyGreyColors = config.legacyGreyColors();
 		configModelBatching = config.modelBatching();
 		configModelCaching = config.modelCaching();
+		configModelReuse = config.reuseUnchangedModels();
 		configDefaultSkyColor = config.defaultSkyColor();
 		configDynamicLights = config.dynamicLights();
 		configTiledLighting = config.tiledLighting().get(!OLD_INTEL_GPU);

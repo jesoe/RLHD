@@ -120,6 +120,13 @@ public final class AsyncCachedModel extends Job implements Model {
 	private int y;
 	private int z;
 	private UploadModelFunc uploadFunc;
+	@Nullable
+	private ModelReuseCache.Entry reuseEntry;
+	private long reuseHash;
+	// Set when this job copies a reused model instead of processing one
+	@Nullable
+	private ReplayModelFunc replayFunc;
+	private int replayVaoType;
 	private long availableMemory;
 
 	@SuppressWarnings("unchecked")
@@ -193,6 +200,46 @@ public final class AsyncCachedModel extends Job implements Model {
 	@Override
 	public short[] getFaceTextures() { return faceTextures.getValue(); }
 
+	/**
+	 * Prepare to copy a reused model, which needs none of the model's arrays.
+	 */
+	public synchronized void setupReplay() {
+		// Wait for completion so that the job has cleared the job system before clearing the isProcessing flag
+		waitForCompletion(true);
+	}
+
+	public synchronized void queueReplay(
+		@Nonnull WorldViewContext ctx,
+		@Nonnull ModelReuseCache.Entry reuseEntry,
+		int vaoType,
+		int drawIndex,
+		@Nonnull Zone zone,
+		@Nullable AlphaModel alphaModel,
+		@Nonnull ReplayModelFunc replayFunc
+	) {
+		this.ctx = ctx;
+		this.zone = zone;
+		this.reuseEntry = reuseEntry;
+		this.replayVaoType = vaoType;
+		this.drawIndex = drawIndex;
+		this.alphaModel = alphaModel;
+		this.replayFunc = replayFunc;
+
+		// No arrays are copied, so mark every field as ready
+		for (int i = 0; i < cachedFields.length; i++)
+			cachedFields[i].cache(null, null, true);
+
+		// The zone's alpha pass waits for its transparent models to be written
+		if (alphaModel != null)
+			zone.pendingModelJobs.add(this);
+
+		isProcessing.set(false);
+		isCompleted.set(false);
+
+		INFLIGHT.add(this);
+		queue();
+	}
+
 	public synchronized boolean setup(Model model) {
 		// Wait for completion so that the job has cleared the job system before clearing the isProcessing flag
 		waitForCompletion(true);
@@ -221,6 +268,8 @@ public final class AsyncCachedModel extends Job implements Model {
 		int drawIndex,
 		int orientation,
 		int x, int y, int z,
+		@Nullable ModelReuseCache.Entry reuseEntry,
+		long reuseHash,
 		@Nonnull UploadModelFunc uploadFunc
 	) {
 		this.ctx = ctx;
@@ -237,6 +286,9 @@ public final class AsyncCachedModel extends Job implements Model {
 		this.y = y;
 		this.z = z;
 		this.uploadFunc = uploadFunc;
+		this.reuseEntry = reuseEntry;
+		this.reuseHash = reuseHash;
+		this.replayFunc = null;
 
 		// Scalars
 		sceneId = model.getSceneId();
@@ -334,6 +386,12 @@ public final class AsyncCachedModel extends Job implements Model {
 			return false;
 
 		try {
+			if (replayFunc != null) {
+				replayFunc.replay(ctx, reuseEntry, replayVaoType, drawIndex, alphaModel);
+				isCompleted.set(true);
+				return true;
+			}
+
 			uploadFunc.upload(
 				ctx,
 				projection,
@@ -346,7 +404,9 @@ public final class AsyncCachedModel extends Job implements Model {
 				isModelPartiallyVisible,
 				drawIndex,
 				orientation,
-				x, y, z
+				x, y, z,
+				reuseEntry,
+				reuseHash
 			);
 			isCompleted.set(true);
 		} catch (Exception e) {
@@ -370,6 +430,8 @@ public final class AsyncCachedModel extends Job implements Model {
 			renderable = null;
 			modelOverride = null;
 			drawIndex = -1;
+			reuseEntry = null;
+			replayFunc = null;
 
 			INFLIGHT.remove(this);
 			POOL.recycle(this);
@@ -459,7 +521,20 @@ public final class AsyncCachedModel extends Job implements Model {
 			boolean isModelPartiallyVisible,
 			int drawIndex,
 			int orientation,
-			int x, int y, int z
+			int x, int y, int z,
+			@Nullable ModelReuseCache.Entry reuseEntry,
+			long reuseHash
+		);
+	}
+
+	@FunctionalInterface
+	public interface ReplayModelFunc {
+		void replay(
+			@Nonnull WorldViewContext ctx,
+			@Nonnull ModelReuseCache.Entry entry,
+			int vaoType,
+			int drawIndex,
+			@Nullable AlphaModel alphaModel
 		);
 	}
 

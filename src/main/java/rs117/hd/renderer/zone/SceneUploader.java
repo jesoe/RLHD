@@ -151,6 +151,15 @@ public class SceneUploader implements AutoCloseable {
 	// Lazily initialized staging buffers
 	public VertexWriteCache.Collection writeCache;
 
+	// When set, uploadTempModel also copies the vertices and faces it writes into these,
+	// with transparent faces in the alpha arrays when they are written to separate buffers
+	public PrimitiveIntArray captureVertices;
+	public PrimitiveIntArray captureFaces;
+	public int capturedFaceIndexBase;
+	public PrimitiveIntArray captureAlphaVertices;
+	public PrimitiveIntArray captureAlphaFaces;
+	public int capturedAlphaFaceIndexBase;
+
 	public void setScene(Scene scene) {
 		if (scene == currentScene)
 			return;
@@ -2227,6 +2236,16 @@ public class SceneUploader implements AutoCloseable {
 		if (writeCache == null)
 			writeCache = new VertexWriteCache.Collection();
 		writeCache.setOutputBuffers(opaqueView.vbo, alphaView.vbo, opaqueView.tbo, alphaView.tbo);
+		if (captureVertices != null && captureFaces != null) {
+			writeCache.opaque.capture = captureVertices;
+			writeCache.opaqueTex.capture = captureFaces;
+			capturedFaceIndexBase = writeCache.opaqueTex.nextFaceIndex();
+		}
+		if (writeCache.useAlphaBuffer && captureAlphaVertices != null && captureAlphaFaces != null) {
+			writeCache.alpha.capture = captureAlphaVertices;
+			writeCache.alphaTex.capture = captureAlphaFaces;
+			capturedAlphaFaceIndexBase = writeCache.alphaTex.nextFaceIndex();
+		}
 
 		final int[] indices1 = model.getFaceIndices1();
 		final int[] indices2 = model.getFaceIndices2();
@@ -2858,6 +2877,10 @@ public class SceneUploader implements AutoCloseable {
 
 	@Override
 	public void close() {
+		captureVertices = null;
+		captureFaces = null;
+		captureAlphaVertices = null;
+		captureAlphaFaces = null;
 		clear();
 		POOL.recycle(this);
 	}

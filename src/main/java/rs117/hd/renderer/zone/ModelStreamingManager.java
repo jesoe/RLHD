@@ -75,6 +75,11 @@ public class ModelStreamingManager {
 	private ZoneRenderer renderer;
 
 	private final ArrayList<AsyncCachedModel> pending = new ArrayList<>();
+	private final AsyncCachedModel.UploadModelFunc uploadTempModelAsync = this::uploadTempModelAsync;
+	private final AsyncCachedModel.ReplayModelFunc replayModelAsync = this::replayModelAsync;
+	private final ModelReuseCache reuseCache = new ModelReuseCache();
+	private final float[] lastViewProjMatrix = new float[16];
+	private int cameraEpoch;
 	private final StreamingContext[] streamingContexts = new StreamingContext[RL_RENDER_THREADS + 1];
 	private int numRenderThreads = -1;
 
@@ -132,8 +137,25 @@ public class ModelStreamingManager {
 		}
 	}
 
+	/**
+	 * Called once per frame with the scene camera's matrix, before any models are drawn.
+	 */
+	void updateCamera(float[] viewProjMatrix) {
+		if (!Arrays.equals(viewProjMatrix, lastViewProjMatrix)) {
+			System.arraycopy(viewProjMatrix, 0, lastViewProjMatrix, 0, lastViewProjMatrix.length);
+			cameraEpoch++;
+		}
+	}
+
+	public void clearReuseCache() {
+		reuseCache.clear();
+	}
+
 	@Subscribe
 	public void onBeforeRender(BeforeRender event) {
+		if ((plugin.frame & 63) == 0)
+			reuseCache.evictStale(plugin.frame);
+
 		for (int i = 0; i < streamingContexts.length; i++)
 			streamingContexts[i].renderableCount = 0;
 
@@ -148,8 +170,19 @@ public class ModelStreamingManager {
 	}
 
 	private boolean isAlphaModel(Model m) {
-		if (m.getTransparency() != 0 || m.getFaceTransparencies() != null)
+		if (m.getTransparency() != 0)
 			return true;
+
+		// Most player and NPC models carry a transparency array that is all zeros. Values from 253 up are never drawn.
+		final byte[] faceTransparencies = m.getFaceTransparencies();
+		if (faceTransparencies != null) {
+			final int faceCount = Math.min(m.getFaceCount(), faceTransparencies.length);
+			for (int f = 0; f < faceCount; f++) {
+				final int t = faceTransparencies[f] & 0xFF;
+				if (t != 0 && t < 253)
+					return true;
+			}
+		}
 
 		final short[] faceTextures = m.getFaceTextures();
 		if (faceTextures != null) {
@@ -256,6 +289,38 @@ public class ModelStreamingManager {
 
 		final int drawIndex = renderThreadId != -1 ? -1 : ctx.obtainDrawIndex(r instanceof Player ? VAO_PLAYER : VAO_OPAQUE);
 		final boolean isModelPartiallyVisible = sceneManager.isRoot(ctx) && modelClassification == 0;
+
+		// Players and NPCs whose pose, position and camera are unchanged since their last draw reuse what was written then,
+		// including the faces hidden from the camera that only cast shadows
+		ModelReuseCache.Entry reuse = null;
+		long reuseHash = 0;
+		if (plugin.configModelReuse &&
+			r instanceof Actor &&
+			sceneManager.isRoot(ctx) &&
+			!ctx.isSquashed
+		) {
+			reuse = reuseCache.claim(r, plugin.frame);
+			if (reuse != null) {
+				final int vaoType = r instanceof Player ? VAO_PLAYER : VAO_OPAQUE;
+				reuseHash = reuse.hash(m, modelOverride, plugin.configUnlitFaceColors, isModelPartiallyVisible, orient, x, y, z);
+				// Whether shadow faces get written depends on the shadow frustum, not just the model
+				if (castsTempShadow(modelOverride, zone))
+					reuseHash = ~reuseHash * 0x9E3779B97F4A7C15L;
+				final boolean hasAlphaModel = alphaModel != null;
+				if (reuse.matches(reuseHash, cameraEpoch, vaoType, hasAlphaModel)) {
+					// Nothing needs copying out of the model, so the client can move on right away
+					final AsyncCachedModel replayJob = obtainReplayJob();
+					if (replayJob != null) {
+						replayJob.queueReplay(ctx, reuse, vaoType, drawIndex, zone, alphaModel, replayModelAsync);
+					} else {
+						replayModel(ctx, reuse, vaoType, drawIndex, alphaModel);
+					}
+					return;
+				}
+				reuse.invalidate();
+			}
+		}
+
 		final AsyncCachedModel asyncModelCache = obtainAvailableAsyncCachedModel(m);
 		if (asyncModelCache != null) {
 			// Fast path, buffer the model into the job queue to unblock rl internals
@@ -272,7 +337,9 @@ public class ModelStreamingManager {
 				drawIndex,
 				orient,
 				x, y, z,
-				this::uploadTempModelAsync
+				reuse,
+				reuseHash,
+				uploadTempModelAsync
 			);
 			return;
 		}
@@ -290,7 +357,9 @@ public class ModelStreamingManager {
 			-1,
 			drawIndex,
 			orient,
-			x, y, z
+			x, y, z,
+			reuse,
+			reuseHash
 		);
 	}
 
@@ -306,7 +375,9 @@ public class ModelStreamingManager {
 		boolean isModelPartiallyVisible,
 		int drawIndex,
 		int orientation,
-		int x, int y, int z
+		int x, int y, int z,
+		ModelReuseCache.Entry reuse,
+		long reuseHash
 	) {
 		final long t = System.nanoTime();
 		uploadTempModel(
@@ -322,9 +393,23 @@ public class ModelStreamingManager {
 			-1,
 			drawIndex,
 			orientation,
-			x, y, z
+			x, y, z,
+			reuse,
+			reuseHash
 		);
 		frameTimer.add(renderable instanceof Actor ? Timer.DRAW_TEMP_ASYNC : Timer.DRAW_DYNAMIC_ASYNC, System.nanoTime() - t);
+	}
+
+	private void replayModelAsync(
+		WorldViewContext ctx,
+		ModelReuseCache.Entry entry,
+		int vaoType,
+		int drawIndex,
+		@Nullable Zone.AlphaModel alphaModel
+	) {
+		final long t = System.nanoTime();
+		replayModel(ctx, entry, vaoType, drawIndex, alphaModel);
+		frameTimer.add(Timer.DRAW_TEMP_ASYNC, System.nanoTime() - t);
 	}
 
 	public void uploadTempModel(
@@ -340,13 +425,21 @@ public class ModelStreamingManager {
 		int vaoType,
 		int drawIndex,
 		int orient,
-		float x, float y, float z
+		float x, float y, float z,
+		@Nullable ModelReuseCache.Entry reuse,
+		long reuseHash
 	) {
-		final PrimitiveCharArray visibleFaces = FACE_INDICES.acquire();
-		final PrimitiveCharArray culledFaces = FACE_INDICES.acquire();
-
 		boolean isActor = renderable instanceof Actor;
 		boolean isPlayer = renderable instanceof Player;
+
+		// opaque player faces have their own vao and are drawn in a separate pass from normal opaque faces
+		// because they are not depth tested. transparent player faces don't need their own vao because normal
+		// transparent faces are already not depth tested
+		if (vaoType == -1)
+			vaoType = isPlayer ? VAO_PLAYER : VAO_OPAQUE;
+
+		final PrimitiveCharArray visibleFaces = FACE_INDICES.acquire();
+		final PrimitiveCharArray culledFaces = FACE_INDICES.acquire();
 		final int renderMode = renderable.getRenderMode();
 		boolean shouldSort =
 			m.getTransparency() != 0 ||
@@ -386,11 +479,14 @@ public class ModelStreamingManager {
 				PooledArrayType.INT.release(faceDistances);
 
 			if (culledFaces.length > 0 &&
-				modelOverride.castShadows &&
-				plugin.configShadowMode != ShadowMode.OFF &&
-				(!sceneManager.isRoot(ctx) || zone != null && zone.inShadowFrustum)
+				(sceneManager.isRoot(ctx) ? castsTempShadow(modelOverride, zone) :
+					modelOverride.castShadows && plugin.configShadowMode != ShadowMode.OFF)
 			) {
 				final DynamicModelVAO.View shadowView = ctx.beginDraw(VAO_SHADOW, culledFaces.length);
+				if (reuse != null) {
+					sceneUploader.captureVertices = reuse.shadowVertices;
+					sceneUploader.captureFaces = reuse.shadowFaces;
+				}
 				sceneUploader.uploadTempModel(
 					culledFaces,
 					m,
@@ -401,6 +497,11 @@ public class ModelStreamingManager {
 					shadowView,
 					shadowView
 				);
+				if (reuse != null) {
+					reuse.shadowFaceIndexBase = sceneUploader.capturedFaceIndexBase;
+					sceneUploader.captureVertices = null;
+					sceneUploader.captureFaces = null;
+				}
 				shadowView.end();
 			}
 
@@ -409,14 +510,15 @@ public class ModelStreamingManager {
 				final int opaqueFaceCount = visibleFaces.length - alphaFaceCount;
 				assert opaqueFaceCount >= 0 && alphaFaceCount >= 0 : "Invalid face counts: " + opaqueFaceCount + ", " + alphaFaceCount;
 
-				// opaque player faces have their own vao and are drawn in a separate pass from normal opaque faces
-				// because they are not depth tested. transparent player faces don't need their own vao because normal
-				// transparent faces are already not depth tested
-				if (vaoType == -1)
-					vaoType = isPlayer ? VAO_PLAYER : VAO_OPAQUE;
 				final DynamicModelVAO.View opaqueView = ctx.beginDraw(vaoType, drawIndex, opaqueFaceCount);
 				final DynamicModelVAO.View alphaView = alphaFaceCount > 0 ? ctx.beginDraw(VAO_ALPHA, alphaFaceCount) : opaqueView;
 
+				if (reuse != null) {
+					sceneUploader.captureVertices = reuse.vertices;
+					sceneUploader.captureFaces = reuse.faces;
+					sceneUploader.captureAlphaVertices = reuse.alphaVertices;
+					sceneUploader.captureAlphaFaces = reuse.alphaFaces;
+				}
 				sceneUploader.uploadTempModel(
 					visibleFaces,
 					m,
@@ -427,6 +529,10 @@ public class ModelStreamingManager {
 					opaqueView,
 					alphaView
 				);
+				if (reuse != null) {
+					reuse.faceIndexBase = sceneUploader.capturedFaceIndexBase;
+					reuse.alphaFaceIndexBase = sceneUploader.capturedAlphaFaceIndexBase;
+				}
 
 				if (opaqueView != alphaView && alphaView.getEndOffset() > alphaView.getStartOffset()) {
 					alphaModel.setView(alphaView);
@@ -434,12 +540,66 @@ public class ModelStreamingManager {
 				}
 				opaqueView.end();
 			}
+
+			if (reuse != null) {
+				reuse.hash = reuseHash;
+				reuse.cameraEpoch = cameraEpoch;
+				reuse.vaoType = vaoType;
+				reuse.hasAlphaModel = alphaModel != null;
+				reuse.valid = true;
+			}
 		} catch (Exception e) {
 			log.error("Error rendering dynamic object", e);
 		} finally {
 			FACE_INDICES.recycle(visibleFaces);
 			FACE_INDICES.recycle(culledFaces);
 		}
+	}
+
+	/** Whether a temp model in the root scene writes its camera-culled faces to the shadow buffers. */
+	private boolean castsTempShadow(ModelOverride modelOverride, @Nullable Zone zone) {
+		return modelOverride.castShadows &&
+			plugin.configShadowMode != ShadowMode.OFF &&
+			zone != null && zone.inShadowFrustum;
+	}
+
+	private void replayModel(
+		WorldViewContext ctx,
+		ModelReuseCache.Entry entry,
+		int vaoType,
+		int drawIndex,
+		@Nullable Zone.AlphaModel alphaModel
+	) {
+		final int faceCount = entry.faces.length / 9;
+		assert entry.vertices.length == faceCount * 3 * DynamicModelVAO.VERT_SIZE_INTS;
+		final int alphaFaceCount = entry.alphaFaces.length / 9;
+		assert entry.alphaVertices.length == alphaFaceCount * 3 * DynamicModelVAO.VERT_SIZE_INTS;
+		final int shadowFaceCount = entry.shadowFaces.length / 9;
+		assert entry.shadowVertices.length == shadowFaceCount * 3 * DynamicModelVAO.VERT_SIZE_INTS;
+
+		if (shadowFaceCount > 0) {
+			final DynamicModelVAO.View shadowView = ctx.beginDraw(VAO_SHADOW, shadowFaceCount);
+			var shadowFaces = shadowView.tbo.getBuffer();
+			entry.replayShadow(shadowView.vbo.getBuffer(), shadowFaces, (shadowView.tbo.getPositionOffsetInts() + shadowFaces.position()) / 3);
+			shadowView.end();
+		}
+
+		if (faceCount + alphaFaceCount == 0)
+			return;
+
+		// Reserve and write in the same order as uploadTempModel
+		final DynamicModelVAO.View view = ctx.beginDraw(vaoType, drawIndex, faceCount);
+		final DynamicModelVAO.View alphaView = alphaFaceCount > 0 && alphaModel != null ? ctx.beginDraw(VAO_ALPHA, alphaFaceCount) : null;
+
+		var faces = view.tbo.getBuffer();
+		entry.replay(view.vbo.getBuffer(), faces, (view.tbo.getPositionOffsetInts() + faces.position()) / 3);
+		if (alphaView != null) {
+			faces = alphaView.tbo.getBuffer();
+			entry.replayAlpha(alphaView.vbo.getBuffer(), faces, (alphaView.tbo.getPositionOffsetInts() + faces.position()) / 3);
+			alphaModel.setView(alphaView);
+			alphaView.end();
+		}
+		view.end();
 	}
 
 	public void ensureAsyncUploadsComplete(@Nullable Zone zone) {
@@ -481,6 +641,17 @@ public class ModelStreamingManager {
 		frameTimer.end(Timer.MODEL_UPLOAD_COMPLETE);
 	}
 
+
+	@Nullable
+	private synchronized AsyncCachedModel obtainReplayJob() {
+		if (AsyncCachedModel.POOL == null || numRenderThreads <= 0)
+			return null;
+
+		AsyncCachedModel result = AsyncCachedModel.POOL.acquire();
+		if (result != null)
+			result.setupReplay();
+		return result;
+	}
 
 	private synchronized AsyncCachedModel obtainAvailableAsyncCachedModel(Model model) {
 		if (AsyncCachedModel.POOL == null || numRenderThreads <= 0)

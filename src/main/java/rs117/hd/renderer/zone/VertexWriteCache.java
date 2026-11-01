@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import rs117.hd.utils.buffer.GLMappedBufferIntWriter.ReservedView;
 import rs117.hd.utils.buffer.GpuIntBuffer;
 import rs117.hd.utils.collections.PooledArrayType;
+import rs117.hd.utils.collections.PrimitiveIntArray;
 
 import static rs117.hd.utils.MathUtils.*;
 
@@ -18,6 +19,8 @@ public final class VertexWriteCache {
 	private final int maxCapacity;
 	private int[] stagingBuffer;
 	private int stagingPosition;
+	// When set, everything written is also appended here
+	public PrimitiveIntArray capture;
 
 	public VertexWriteCache(String name, int initialCapacity) {
 		this(name, initialCapacity, initialCapacity);
@@ -55,6 +58,13 @@ public final class VertexWriteCache {
 
 		if (stagingBuffer.length < maxCapacity)
 			stagingBuffer = PooledArrayType.INT.ensureCapacity(stagingBuffer, min(stagingBuffer.length * 2, maxCapacity));
+	}
+
+	/**
+	 * The face index the next {@link #putFace} call will return.
+	 */
+	public int nextFaceIndex() {
+		return (outputOffset + outputBuffer.position() + stagingPosition) / 3;
 	}
 
 	public int putFace(
@@ -156,6 +166,8 @@ public final class VertexWriteCache {
 			return;
 
 		try {
+			if (capture != null)
+				capture.put(stagingBuffer, 0, stagingPosition);
 			outputBuffer.put(stagingBuffer, 0, stagingPosition);
 		} catch (Exception e) {
 			log.error("Failed to flush vertex write cache {} written: {} remaining: {}", name, stagingPosition, outputBuffer.remaining(), e);
@@ -174,6 +186,7 @@ public final class VertexWriteCache {
 		public boolean useAlphaBuffer;
 
 		public void setOutputBuffers(ReservedView opaque, ReservedView alpha, ReservedView opaqueTex, ReservedView alphaTex) {
+			clearCapture();
 			this.opaque.setOutputView(opaque);
 			this.opaqueTex.setOutputView(opaqueTex);
 			useAlphaBuffer = alpha != opaque && alphaTex != opaqueTex;
@@ -187,6 +200,7 @@ public final class VertexWriteCache {
 		}
 
 		public void setOutputBuffers(GpuIntBuffer opaque, GpuIntBuffer alpha, GpuIntBuffer tex) {
+			clearCapture();
 			this.opaque.setOutputBuffer(opaque.getBuffer());
 			this.opaqueTex.setOutputBuffer(tex.getBuffer());
 			useAlphaBuffer = alpha != null && opaque != alpha;
@@ -197,6 +211,10 @@ public final class VertexWriteCache {
 				this.alpha.setOutputBuffer(null);
 				this.alphaTex.setOutputBuffer(null);
 			}
+		}
+
+		private void clearCapture() {
+			opaque.capture = alpha.capture = opaqueTex.capture = alphaTex.capture = null;
 		}
 
 		public VertexWriteCache getVertexBuffer() { return opaque; }

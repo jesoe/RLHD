@@ -1532,6 +1532,19 @@ public interface HdPluginConfig extends Config
 		return true;
 	}
 
+	String KEY_REUSE_UNCHANGED_MODELS = "reuseUnchangedModels";
+	@ConfigItem(
+		keyName = KEY_REUSE_UNCHANGED_MODELS,
+		name = "Reuse unchanged models",
+		description =
+			"Reuse a player or NPC's processed model from the previous frame when its pose, position and the camera haven't changed.<br>" +
+			"Saves CPU time at high frame rates. Turn off if characters ever look wrong.",
+		section = technicalSettings
+	)
+	default boolean reuseUnchangedModels() {
+		return true;
+	}
+
 	String KEY_WINDOWS_HDR_CORRECTION = "windowsHdrCorrection";
 	@ConfigItem(
 		keyName = KEY_WINDOWS_HDR_CORRECTION,

@@ -384,6 +384,9 @@ public class ZoneRenderer implements Renderer {
 
 	@Override
 	public void processConfigChanges(Set<String> keys) {
+		// Cached models may depend on any setting
+		modelStreamingManager.clearReuseCache();
+
 		if (keys.contains(KEY_ASYNC_MODEL_PROCESSING))
 			modelStreamingManager.reinitialize();
 
@@ -473,7 +476,9 @@ public class ZoneRenderer implements Renderer {
 						VAO_PRESCENE,
 						-1,
 						0,
-						cameraX, cameraY, cameraZ
+						cameraX, cameraY, cameraZ,
+						null,
+						0
 					);
 				}
 
@@ -552,6 +557,7 @@ public class ZoneRenderer implements Renderer {
 		hasSceneCameraChanged = sceneCamera.isViewDirty() || sceneCamera.isProjDirty();
 		sceneCamera.getViewMatrix(plugin.viewMatrix);
 		sceneCamera.getViewProjMatrix(plugin.viewProjMatrix);
+		modelStreamingManager.updateCamera(plugin.viewProjMatrix);
 		sceneCamera.getInvViewProjMatrix(plugin.invViewProjMatrix);
 		if (!plugin.enableFreezeFrame)
 			sceneCamera.getFrustumPlanes(plugin.cameraFrustum);

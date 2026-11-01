@@ -348,6 +348,7 @@ public class HdPlugin extends Plugin {
 	public static boolean SUPPORTS_INDIRECT_DRAW;
 	public static boolean SUPPORTS_MULTI_INDIRECT_DRAW;
 	public static boolean SUPPORTS_STORAGE_BUFFERS;
+	public static boolean STAGE_DYNAMIC_MODELS;
 
 	public Canvas canvas;
 	public JFrame clientJFrame;
@@ -615,6 +616,7 @@ public class HdPlugin extends Plugin {
 					config.indirectDraw().get(NVIDIA_GPU && !APPLE);
 				SUPPORTS_MULTI_INDIRECT_DRAW = SUPPORTS_INDIRECT_DRAW && (GL_CAPS.OpenGL43 || GL_CAPS.GL_ARB_multi_draw_indirect);
 				SUPPORTS_STORAGE_BUFFERS = GL_CAPS.GL_ARB_buffer_storage && !DEBUG_MAC_OS && config.storageBuffers().get(!INTEL_GPU);
+				STAGE_DYNAMIC_MODELS = SUPPORTS_STORAGE_BUFFERS && config.stageAnimatedModels();
 
 				log.info("Starting 117 HD... (count: {})", startupCount);
 				log.info("Renderer:            {}", rendererClass.getSimpleName());
@@ -630,6 +632,7 @@ public class HdPlugin extends Plugin {
 				log.info("Indirect draw:       {}", SUPPORTS_INDIRECT_DRAW);
 				log.info("Multi indirect draw: {}", SUPPORTS_MULTI_INDIRECT_DRAW);
 				log.info("Storage buffers:     {}", SUPPORTS_STORAGE_BUFFERS);
+				log.info("Model staging:       {}", STAGE_DYNAMIC_MODELS);
 				log.info("Low memory mode:     {}", useLowMemoryMode);
 
 				renderer = injector.getInstance(rendererClass);
@@ -1947,6 +1950,7 @@ public class HdPlugin extends Plugin {
 							case KEY_LEGACY_RENDERER:
 							case KEY_INDIRECT_DRAW:
 							case KEY_STORAGE_BUFFERS:
+							case KEY_STAGE_ANIMATED_MODELS:
 							case KEY_SHADING_MODE:
 								restartPlugin();
 								// since we'll be restarting the plugin anyway, skip pending changes

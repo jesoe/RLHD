@@ -1532,6 +1532,20 @@ public interface HdPluginConfig extends Config
 		return true;
 	}
 
+	String KEY_STAGE_ANIMATED_MODELS = "stageAnimatedModels";
+	@ConfigItem(
+		keyName = KEY_STAGE_ANIMATED_MODELS,
+		name = "Copy animated models to VRAM",
+		description =
+			"Copy each frame's player and NPC geometry into video memory before drawing it,<br>" +
+			"instead of drawing it straight from the mapped buffer it was written to.<br>" +
+			"Which is faster depends on the GPU. Only applies when storage buffers are enabled.",
+		section = technicalSettings
+	)
+	default boolean stageAnimatedModels() {
+		return true;
+	}
+
 	String KEY_WINDOWS_HDR_CORRECTION = "windowsHdrCorrection";
 	@ConfigItem(
 		keyName = KEY_WINDOWS_HDR_CORRECTION,

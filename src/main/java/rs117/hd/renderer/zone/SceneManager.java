@@ -32,6 +32,7 @@ import rs117.hd.scene.EnvironmentManager;
 import rs117.hd.scene.FishingSpotReplacer;
 import rs117.hd.scene.LightManager;
 import rs117.hd.scene.ProceduralGenerator;
+import rs117.hd.scene.SceneContext;
 import rs117.hd.scene.areas.AABB;
 import rs117.hd.scene.areas.Area;
 import rs117.hd.utils.DestructibleHandler;
@@ -54,6 +55,7 @@ public class SceneManager {
 	public static final int NUM_ZONES = EXTENDED_SCENE_SIZE >> 3;
 
 	private static final int ZONE_DEFER_DIST_START = 3;
+	private static final int MAX_DEFERRED_CENTRAL_ZONES = 8;
 
 	@Inject
 	private Injector injector;
@@ -205,7 +207,7 @@ public class SceneManager {
 
 				root.sceneContext.fillGaps = config.fillGapsInTerrain();
 
-				generateSceneDataTask.queue();
+				queueGenerateSceneData(root.sceneContext, root.sceneContext);
 
 				root.invalidate();
 				for (var sub : subs)
@@ -402,11 +404,22 @@ public class SceneManager {
 		return false;
 	}
 
+	// Captured when the task is queued. Reading them when it runs could pick up the already swapped scene,
+	// which would compare the scene against itself and skip reusing the previous scene's results.
+	private volatile SceneContext generateSceneDataTarget;
+	private volatile SceneContext generateSceneDataPrev;
+
 	@Getter
 	private final GenericJob generateSceneDataTask = GenericJob.build(
 		"ProceduralGenerator::generateSceneData",
-		(task) -> proceduralGenerator.generateSceneData(nextSceneContext != null ? nextSceneContext : root.sceneContext, root.sceneContext)
+		(task) -> proceduralGenerator.generateSceneData(generateSceneDataTarget, generateSceneDataPrev)
 	);
+
+	private void queueGenerateSceneData(SceneContext target, SceneContext prev) {
+		generateSceneDataTarget = target;
+		generateSceneDataPrev = prev;
+		generateSceneDataTask.queue();
+	}
 
 	@Getter
 	private final GenericJob loadSceneLightsTask = GenericJob.build(
@@ -510,7 +523,6 @@ public class SceneManager {
 			loadSceneLightsTask.cancel();
 			calculateRoofChangesTask.cancel();
 
-			generateSceneDataTask.queue();
 			loadSceneLightsTask.queue();
 
 			if (nextSceneContext.enableAreaHiding) {
@@ -548,6 +560,10 @@ public class SceneManager {
 					nextSceneContext.currentArea = possibleArea;
 				}
 			}
+
+			// Queue after the area is decided, since tile overrides depend on it and
+			// previous results can only be reused when the area is unchanged
+			queueGenerateSceneData(nextSceneContext, ctx.sceneContext);
 
 			for (int x = 0; x < NUM_ZONES; ++x) {
 				for (int z = 0; z < NUM_ZONES; ++z) {
@@ -608,6 +624,29 @@ public class SceneManager {
 				!nextSceneContext.isInHouse &&
 				root.sceneContext != null &&
 				nextSceneContext.totalReused + nextSceneContext.totalDeferred > 0;
+			// When only a few zones near the player are new, which is typical when crossing a region border,
+			// stream them in right after the swap instead of making the client thread wait for them.
+			// Each one waits for the whole scene's terrain data, so loading them up front stalls the client thread.
+			boolean deferCentralZones = false;
+			if (staggerLoad) {
+				// The zones right around the player must already be loaded, otherwise the ground could vanish briefly
+				int centralNewZones = 0;
+				boolean playerAreaLoaded = true;
+				for (int x = 0; x < NUM_ZONES; ++x) {
+					for (int z = 0; z < NUM_ZONES; ++z) {
+						Zone zone = nextZones[x][z];
+						if (zone != null && zone.initialized)
+							continue;
+						float dist = distance(vec(x, z), vec(NUM_ZONES / 2, NUM_ZONES / 2));
+						if (dist < ZONE_DEFER_DIST_START)
+							centralNewZones++;
+						if (dist < 1.5f)
+							playerAreaLoaded = false;
+					}
+				}
+				deferCentralZones = playerAreaLoaded && centralNewZones <= MAX_DEFERRED_CENTRAL_ZONES;
+			}
+
 			for (int x = 0; x < NUM_ZONES; ++x) {
 				for (int z = 0; z < NUM_ZONES; ++z) {
 					Zone zone = nextZones[x][z];
@@ -616,7 +655,7 @@ public class SceneManager {
 
 					if (!zone.initialized) {
 						float dist = distance(vec(x, z), vec(NUM_ZONES / 2, NUM_ZONES / 2));
-						if (!staggerLoad || dist < ZONE_DEFER_DIST_START) {
+						if (!staggerLoad || dist < ZONE_DEFER_DIST_START && !deferCentralZones) {
 							ZoneUploadJob
 								.build(ctx, nextSceneContext, zone, true, x, z)
 								.queue(ctx.sceneLoadGroup, generateSceneDataTask);
@@ -639,7 +678,7 @@ public class SceneManager {
 					// Synchronize creation of delayed upload jobs with zone swaps and invalidation
 					synchronized (ctx) {
 						ZoneUploadJob upload = ZoneUploadJob.build(ctx, nextSceneContext, newZone, false, sorted.x, sorted.z);
-						upload.revealAfterTimestampMs =
+						upload.revealAfterTimestampMs = sorted.dist < ZONE_DEFER_DIST_START ? 0 :
 							timeMs + ceil(clamp(sorted.dist / 15.0f, 0.25f, 1.5f) * 1000.0f);
 						sorted.zone.setUploadJob(upload);
 					}

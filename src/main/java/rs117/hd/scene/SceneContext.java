@@ -32,6 +32,7 @@ public class SceneContext {
 	public static final int TILE_OVERRIDE_UNDERLAY = 1;
 	public static final int TILE_OVERRIDE_OVERLAY = 2;
 	public static final int TILE_OVERRIDE_COUNT = 3;
+	private static final char TILE_OVERRIDE_NONE_MARK = Character.MAX_VALUE;
 
 	public static final int VERTEX_IS_LAND = 1;
 	public static final int VERTEX_IS_WATER = 1 << 1;
@@ -186,35 +187,39 @@ public class SceneContext {
 		TileOverride overlayOverride
 	) {
 		final int offset = getTileIdx(plane, x, y) * TILE_OVERRIDE_COUNT;
-
-		if (mainOverride != null && mainOverride != TileOverride.NONE)
-			tileOverrideIndices[offset + TILE_OVERRIDE_MAIN] = (char) (mainOverride.index + 1);
-
-		if (underlayOverride != null && underlayOverride != TileOverride.NONE)
-			tileOverrideIndices[offset + TILE_OVERRIDE_UNDERLAY] = (char) (underlayOverride.index + 1);
-
-		if (overlayOverride != null && overlayOverride != TileOverride.NONE)
-			tileOverrideIndices[offset + TILE_OVERRIDE_OVERLAY] = (char) (overlayOverride.index + 1);
+		tileOverrideIndices[offset + TILE_OVERRIDE_MAIN] = encodeTileOverride(mainOverride);
+		tileOverrideIndices[offset + TILE_OVERRIDE_UNDERLAY] = encodeTileOverride(underlayOverride);
+		tileOverrideIndices[offset + TILE_OVERRIDE_OVERLAY] = encodeTileOverride(overlayOverride);
 	}
 
+	/**
+	 * 0 means the tile hasn't been computed yet, so NONE gets its own marker.
+	 * This lets the next scene reuse tiles without overrides, which are most tiles.
+	 */
+	private static char encodeTileOverride(TileOverride override) {
+		return override == null || override == TileOverride.NONE ? TILE_OVERRIDE_NONE_MARK : (char) (override.index + 1);
+	}
+
+	private static TileOverride decodeTileOverride(int idx) {
+		return idx > 0 && idx != TILE_OVERRIDE_NONE_MARK ? TileOverrideManager.OVERRIDES[idx - 1] : TileOverride.NONE;
+	}
+
+	/**
+	 * @return whether overrides were computed for this tile, in which case they're written to result
+	 */
 	public boolean getTileOverrides(int plane, int x, int y, TileOverride[] result) {
 		final int offset = getTileIdx(plane, x, y) * TILE_OVERRIDE_COUNT;
+		if (tileOverrideIndices[offset + TILE_OVERRIDE_MAIN] == 0)
+			return false;
 
-		boolean hasOverrides = false;
-		for (int i = 0; i < TILE_OVERRIDE_COUNT; i++) {
-			final int idx = tileOverrideIndices[offset + i];
-			result[i] = idx > 0 ? TileOverrideManager.OVERRIDES[idx - 1] : TileOverride.NONE;
-			if (idx > 0)
-				hasOverrides = true;
-		}
-
-		return hasOverrides;
+		for (int i = 0; i < TILE_OVERRIDE_COUNT; i++)
+			result[i] = decodeTileOverride(tileOverrideIndices[offset + i]);
+		return true;
 	}
 
 	public TileOverride getTileOverride(int plane, int x, int y, int type) {
 		final int offset = getTileIdx(plane, x, y) * TILE_OVERRIDE_COUNT;
-		final int idx = tileOverrideIndices[offset + type];
-		return idx > 0 ? TileOverrideManager.OVERRIDES[idx - 1] : TileOverride.NONE;
+		return decodeTileOverride(tileOverrideIndices[offset + type]);
 	}
 
 	public int[] getTileIndices(int tileIdx, int[] indices) {

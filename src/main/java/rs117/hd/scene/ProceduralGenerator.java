@@ -506,18 +506,19 @@ public class ProceduralGenerator {
 				final Tile[][] prevZTiles = canReuseScene ? prevTiles[z] : null;
 				final Tile[][] zTiles = tiles[z];
 				for (int x = 0; x < sceneContext.sizeX; ++x) {
-					final Tile[] prevXTiles = canReuseScene ? prevZTiles[z] : null;
+					final int oX = x + dX;
+					final Tile[] prevXTiles =
+						canReuseScene && oX >= SCENE_EDGE_PADDING && oX < sceneContext.sizeX - SCENE_EDGE_PADDING ?
+							prevZTiles[oX] : null;
 					final Tile[] xTiles = zTiles[x];
 					for (int y = 0; y < sceneContext.sizeZ; ++y) {
 						final Tile tile = xTiles[y];
 						if (tile == null)
 							continue;
 
-						final int oX = x + dX;
 						final int oY = y + dY;
 						final boolean canReuseTile =
-							canReuseScene &&
-							oX >= SCENE_EDGE_PADDING && oX < sceneContext.sizeX - SCENE_EDGE_PADDING &&
+							prevXTiles != null &&
 							oY >= SCENE_EDGE_PADDING && oY < sceneContext.sizeZ - SCENE_EDGE_PADDING &&
 							prevXTiles[oY] != null;
 
@@ -548,7 +549,13 @@ public class ProceduralGenerator {
 			int prevTileExX,
 			int prevTileExY
 		) {
-			if (prevSceneContext != null && prevSceneContext.getTileOverrides(tileZ, prevTileExX, prevTileExY, overrides)) {
+			// Only reuse the previous scene's result if the tile is the same there, since instances can map
+			// different map squares to the same scene coordinates
+			if (prevSceneContext != null &&
+				prevSceneContext.scene.getOverlayIds()[tileZ][prevTileExX][prevTileExY] == (short) ids[0] &&
+				prevSceneContext.scene.getUnderlayIds()[tileZ][prevTileExX][prevTileExY] == (short) ids[1] &&
+				prevSceneContext.getTileOverrides(tileZ, prevTileExX, prevTileExY, overrides)
+			) {
 				sceneContext.setTileOverride(tileZ, tileExX, tileExY, overrides);
 				return;
 			}
